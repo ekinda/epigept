@@ -1,103 +1,104 @@
+import math
+import os
+import random
+
 import numpy as np
 import torch
 torch.set_default_tensor_type(torch.FloatTensor)
-from torch.utils.data import Dataset
-from pyfasta import Fasta
-from config import *
-import random
-import pandas as pd
-import sys
+from torch.utils.data import Dataset, Sampler
+from .config import LEARNING_RATE, BATCH_SIZE, INPUT_LEN, TARGET_LEN, SEQUENCE_DIM, TF_DIM, NUM_LAYER, NUM_HEAD, NUM_SIGNALS, CHANNEL_SIZE, WORD_NUM
 
-acgt2num = {'A': 0,
-            'C': 1,
-            'G': 2,
-            'T': 3}
+class EpigeptCorgiDataset(Dataset):
+    """Corgi-format loader adapted for EpiGePT inputs.
 
+    Returns raw corgi-style tensors:
+      dna_seq:      (L_dna=524288, 4)
+      tf_expr:      (n_tf,)
+      tf_binding:   (L_bins=8192, n_tf)
+      padded_label: (L_bins=8192, output_channels)
+      exp_mask:     (output_channels, 1)
+    Downstream logic in the Lightning module handles quarter splits and pooling.
+    """
+    def __init__(
+        self,
+        dna_path: str,
+        motif_path: str,
+        tf_expression_path: str,
+        experiment_mask_path: str,
+        tissue_dir: str,
+        sequence_ids: list,
+        tissue_ids: list,
+        output_channels: int = NUM_SIGNALS,
+    ):
+        super().__init__()
+        self.sequence_ids = list(sequence_ids)
+        self.tissue_ids = list(tissue_ids)
+        self.output_channels = output_channels
 
-class GenomicData(Dataset):
-    def __init__(self, train_idx, path, num_train_regions, quantile_norm=False, isTrain = True):
-        self.geno_path = path
-        self.genome = Fasta('%s/genome.fa'%path)
-        self.train_idx = train_idx
-        self.np_tf_bs = np.load('%s/motifscore.npy'%path)
-        pd_tf_gexp = pd.read_csv('%s/aggregated_tf_expr.csv'%path,header=0,sep='\t',index_col=[0])
-        pd_tf_gexp = pd_tf_gexp.T
-        if quantile_norm:
-            pd_tf_gexp = pd.DataFrame.transpose(self.quantile_norm_trans(pd.DataFrame.transpose(pd_tf_gexp)))
-        self.pd_tf_gexp = np.log(pd_tf_gexp+1)
-        self.signals = np.load('%s/targets_data.npy'%path)
-        self.signals = np.log(self.signals + 1)
-        self.regions = []
-        with open("%s/overlap_count_gt50.128k.bin"%path, "rb") as file:
-            lines = file.readlines()
-        for line in lines:
-            self.regions.append(line.decode('utf-8').split('\t')[:3])
-        np.random.seed(123)
-        # shuffle
-        region_idx_subset = np.random.choice(np.arange(len(self.regions)),size=len(self.regions),replace=False)
-        train_region_idx = np.random.choice(np.arange(len(region_idx_subset)),size=num_train_regions,replace=False)
-        test_region_idx = [item for item in np.arange(len(region_idx_subset)) if item not in train_region_idx]
-        if isTrain:
-            self.region_idx_subset = region_idx_subset[train_region_idx]
-        else:
-            self.region_idx_subset = region_idx_subset[test_region_idx]
-        self.celllines = self.pd_tf_gexp.index.values[train_idx]
-        self.train_idx = train_idx
-
+        self.dna_sequences = np.load(dna_path, mmap_mode='r')
+        self.tf_binding = np.memmap(
+            motif_path, 
+            dtype=np.float16, 
+            mode='r',
+            shape=(14395, 4096, 711)
+        )
+        self.tf_expression = torch.from_numpy(np.load(tf_expression_path)).float()
         
-    def quantile_norm_trans(self, matrix):
-        rank_mean = matrix.stack().groupby(matrix.rank(method='first').stack().astype(int)).mean()
-        return matrix.rank(method='min').stack().astype(int).map(rank_mean).unstack()
+        ## DEBUG ##
+        self.tf_expression = self.tf_expression[:, :712]
+        ###########
+        # Until I supply the real tf exp matrix subsetted to the 711 epigept TFs.
+        # Also i think epigept needs 712 numbers so that
+        # 712 + 256 (sequence dim) = 968 (transformer input dim) which needs to be a multiple of 8 (heads)????
 
-    def get_seq_from_meta(self,region_idx):
-        seq_info = self.regions[region_idx]
-        chrom = seq_info[0]
-        start = int(seq_info[1])
-        end = int(seq_info[2])
-        seq = self.genome[chrom][start:end]
-        return seq
+        self.experiment_mask = np.load(experiment_mask_path)
+        self.tissue_dir = tissue_dir
 
-    def seq2mat(self,seq):
-        seq = seq.upper()
-        h = 4
-        w = len(seq)
-        mat = np.zeros((h, w), dtype=bool)  # True or false in mat
-        for i in range(w):
-            if seq[i] != 'N':
-                mat[acgt2num[seq[i]], i] = 1.
-        return mat
+        if len(self.sequence_ids) == 0:
+            raise ValueError("sequence_ids must be non-empty")
+        if len(self.tissue_ids) == 0:
+            raise ValueError("tissue_ids must be non-empty")
+        if self.dna_sequences.shape[0] != self.tf_binding.shape[0]:
+            raise ValueError("dna and motif arrays must share the first dimension")
+        if self.experiment_mask.shape[1] != self.output_channels:
+            raise ValueError("experiment_mask second dimension must equal output_channels")
 
-    def get_signals(self,region_idx,cellline_idx):
-        signals = self.signals[self.train_idx[cellline_idx],region_idx * 1000 : (region_idx + 1)*1000 ,:]
-        return signals
-    
-    def get_tf_state(self,region_idx,cellline_idx):
-        tf_gexp_vec = self.pd_tf_gexp.loc[str(self.celllines[cellline_idx])].values #(711,)
-        tf_gexp_feat = np.tile(tf_gexp_vec,(1000,1))
-        tf_bs_feat = self.np_tf_bs[region_idx*1000:(region_idx+1)*1000]  # (50, 711)
-        return tf_bs_feat*tf_gexp_feat
-    
-        
-    def __getitem__(self, index):
-        region_idx = self.region_idx_subset[int(index // len(self.celllines))]
-        cellline_idx = index % len(self.celllines)  #0-99 bug here!
-        seq = self.get_seq_from_meta(region_idx)
-        seq_embeds = self.seq2mat(seq)
-        tf_feats = self.get_tf_state(region_idx,cellline_idx)
-        targets_label = self.get_signals(region_idx,cellline_idx)
-
-        tf_feats = np.pad(tf_feats,((0, 0), (0, 1)),'constant',constant_values = (0,0))
-        tf_feats = np.array(tf_feats,dtype='float16')
-        
-        seq_embeds = np.array(seq_embeds,dtype='float16')#(50,)
-        seq_embeds = torch.from_numpy(seq_embeds)
-        tf_feats = torch.from_numpy(tf_feats)
-        targets_label = torch.from_numpy(targets_label)
-        
-        seq_embeds = seq_embeds.type(torch.FloatTensor)
-        tf_feats = tf_feats.type(torch.FloatTensor)
-        targets_label = targets_label.type(torch.FloatTensor)
-        return (seq_embeds, tf_feats, targets_label)
+        self._tissue_arrays = {}
 
     def __len__(self):
-        return len(self.celllines)*len(self.region_idx_subset)
+        return len(self.sequence_ids) * len(self.tissue_ids)
+
+    def _load_tissue_array(self, tissue_id: int) -> np.memmap:
+        if tissue_id not in self._tissue_arrays:
+            path = os.path.join(self.tissue_dir, f"tissue_{tissue_id}.npy")
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Missing tissue file: {path}")
+            self._tissue_arrays[tissue_id] = np.load(path, mmap_mode='r')
+        return self._tissue_arrays[tissue_id]
+
+    def __getitem__(self, index: int):
+        seq_offset = index // len(self.tissue_ids)
+        tissue_offset = index % len(self.tissue_ids)
+        seq_id = self.sequence_ids[seq_offset]
+        tissue_id = self.tissue_ids[tissue_offset]
+
+        dna_seq = torch.tensor(self.dna_sequences[seq_id], dtype=torch.float32)              # (524288, 4)
+        tf_binding = torch.tensor(self.tf_binding[seq_id], dtype=torch.float32)              # (4096, n_tf)
+        
+        ## DEBUG: Pad with zero column to match expected 712 TFs ##
+        tf_binding = torch.cat(
+            [tf_binding, torch.zeros((tf_binding.shape[0], 1), dtype=torch.float32)],
+            dim=1
+        )  # (4096, 712)
+        ###########################################################
+        
+        tf_expr = self.tf_expression[tissue_id]
+
+        tissue_array = self._load_tissue_array(tissue_id)[seq_id]                # (8192, n_available)
+        mask_vec = self.experiment_mask[tissue_id]                               # (C,)
+        available_idx = np.where(mask_vec == 1)[0]
+        padded_label = torch.zeros((tissue_array.shape[0], self.output_channels), dtype=torch.float32)
+        padded_label[:, available_idx] = torch.tensor(tissue_array, dtype=torch.float32)
+        exp_mask = torch.from_numpy(mask_vec.astype(np.float32)).unsqueeze(-1)   # (C, 1)
+
+        return dna_seq, tf_expr, tf_binding, padded_label, exp_mask

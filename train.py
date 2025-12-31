@@ -1,128 +1,101 @@
-import numpy as np
+import argparse
 import os
-import pandas as pd
-import argparse
-import torch
-import argparse
+
 import pytorch_lightning as pl
+import torch
+from torch.utils.data import DataLoader
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+
+from model.config import *
+from model import EpiGePT, dataset
+
 torch.backends.cudnn.deterministic = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-from model.config import *
-from model import EpiGePT,dataset
-
 
 
 def main(hparams):
     pl.seed_everything(hparams.seed)
-    if hparams.train:
-        model = EpiGePT.EpiGePT(WORD_NUM,SEQUENCE_DIM,TF_DIM,BATCH_SIZE)
-        trainer = pl.Trainer(
-            max_epochs=90,
-            logger=pl_loggers.TensorBoardLogger(save_dir='logs',name='TensorBoard',version=5),
-            callbacks=[EarlyStopping(monitor='val_loss',mode='min',patience = 3)],
-            checkpoint_callback=pl.callbacks.ModelCheckpoint(dirpath=hparams.save_model_path, verbose=True),
-            default_root_dir=os.getcwd(),
-            # distributed_backend='ddp',
-            gpus=[0])
-        trainer.fit(model)
-    elif hparams.pred_method == 0:
-        """
-        cross cell type prediction on the same genomic regions
-        """
-        model = EpiGePT.EpiGePT(WORD_NUM,SEQUENCE_DIM,TF_DIM,BATCH_SIZE)
-        np.random.seed(123)
-        test_idx = np.load(hparams.cell_idxs_path)
-        model.load_state_dict(torch.load(hparams.pretrained_model_path,map_location='cuda:0')['state_dict'])
-        model.eval()
-        model.cuda()
-        for i in range(len(test_idx)):
-            predicted_proba = []
-            true_label = []
-            print('cell index ' + str(test_idx[i]) )
-            test_data_loader = torch.utils.data.DataLoader(dataset.GenomicData(np.array([test_idx[i]]),'data',hparams.num_train_region),batch_size=BATCH_SIZE, shuffle=False,num_workers=16)
-            for inputs,tf_feats,labels in test_data_loader:
-                pre_batch = model(inputs,tf_feats)
-                pre_batch = pre_batch.cpu.detach().numpy()
-                pre_batch = pre_batch.reshape((pre_batch.shape[0]*pre_batch.shape[1],NUM_SIGNALS))
-                predicted_proba.extend(pre_batch.tolist())
-                labels = labels.detach().numpy()
-                labels = labels.reshape(-1,NUM_SIGNALS)
-                true_label.extend(labels)
-            predicted_proba = np.array(predicted_proba)
-            predicted_proba = pd.DataFrame(predicted_proba)
-            predicted_proba.to_csv('%s/predicted_proba_cell_type%s.csv'%(hparams.pred_path,i), index=None, header=None)
-            np.save('%s/true_label_%s.npy'%(hparams.pred_path,i),true_label)
-    elif hparams.pred_method == 1:
-        """
-        cross cell region prediction on the same genomic regions
-        """
-        model = EpiGePT.EpiGePT(WORD_NUM,SEQUENCE_DIM,TF_DIM,BATCH_SIZE)
-        np.random.seed(123)
-        train_idx = np.load(hparams.cell_idxs_path)
-        model.load_state_dict(torch.load(hparams.pretrained_model_path,map_location='cuda:0')['state_dict'])
-        model.eval()
-        model.cuda()
-        for i in range(len(train_idx)):
-            predicted_proba = []
-            true_label = []
-            print('cell index ' + str(train_idx[i]) )
-            test_data_loader = torch.utils.data.DataLoader(dataset.GenomicData(np.array([train_idx[i]]),'data',hparams.num_train_region,isTrain=False),batch_size=BATCH_SIZE, shuffle=False,num_workers=16)
-            for inputs,tf_feats,labels in test_data_loader:
-                pre_batch = model(inputs,tf_feats)
-                pre_batch = pre_batch.cpu.detach().numpy()
-                pre_batch = pre_batch.reshape((pre_batch.shape[0]*pre_batch.shape[1],NUM_SIGNALS))
-                predicted_proba.extend(pre_batch.tolist())
-                labels = labels.detach().numpy()
-                labels = labels.reshape(-1,NUM_SIGNALS)
-                true_label.extend(labels)
-            predicted_proba = np.array(predicted_proba)
-            predicted_proba = pd.DataFrame(predicted_proba)
-            predicted_proba.to_csv('%s/predicted_proba_cell_type%s.csv'%(hparams.pred_path,i), index=None, header=None)
-            np.save('%s/true_label_%s.npy'%(hparams.pred_path,i),true_label)
-    elif hparams.pred_method == 2:
-        """
-        cross cell both prediction on the same genomic regions
-        """
-        model = EpiGePT.EpiGePT(WORD_NUM,SEQUENCE_DIM,TF_DIM,BATCH_SIZE)
-        np.random.seed(123)
-        test_idx = np.load(hparams.cell_idxs_path)
-        model.load_state_dict(torch.load(hparams.pretrained_model_path,map_location='cuda:0')['state_dict'])
-        model.eval()
-        model.cuda()
-        for i in range(len(test_idx)):
-            predicted_proba = []
-            true_label = []
-            print('cell index ' + str(test_idx[i]) )
-            test_data_loader = torch.utils.data.DataLoader(dataset.GenomicData(np.array([test_idx[i]]),'data',hparams.num_train_region,isTrain=False),batch_size=BATCH_SIZE, shuffle=False,num_workers=16)
-            for inputs,tf_feats,labels in test_data_loader:
-                pre_batch = model(inputs,tf_feats)
-                pre_batch = pre_batch.cpu.detach().numpy()
-                pre_batch = pre_batch.reshape((pre_batch.shape[0]*pre_batch.shape[1],NUM_SIGNALS))
-                predicted_proba.extend(pre_batch.tolist())
-                labels = labels.detach().numpy()
-                labels = labels.reshape(-1,NUM_SIGNALS)
-                true_label.extend(labels)
-            predicted_proba = np.array(predicted_proba)
-            predicted_proba = pd.DataFrame(predicted_proba)
-            predicted_proba.to_csv('%s/predicted_proba_cell_type%s.csv'%(hparams.pred_path,i), index=None, header=None)
-            np.save('%s/true_label_%s.npy'%(hparams.pred_path,i),true_label)
-    else:
-        return 0
-            
-        
+
+    train_seq_end = hparams.num_sequences - max(0, hparams.val_sequences)
+    train_dataset = dataset.EpigeptCorgiDataset(
+        dna_path=hparams.dna_path,
+        motif_path=hparams.motif_path,
+        tf_expression_path=hparams.tf_expression_path,
+        experiment_mask_path=hparams.mask_path,
+        tissue_dir=hparams.tissue_dir,
+        sequence_ids=list(range(train_seq_end)),
+        tissue_ids=hparams.tissue_ids,
+        output_channels=NUM_SIGNALS,
+    )
+
+    val_dataset = None
+    if hparams.val_sequences > 0:
+        val_dataset = dataset.EpigeptCorgiDataset(
+            dna_path=hparams.dna_path,
+            motif_path=hparams.motif_path,
+            tf_expression_path=hparams.tf_expression_path,
+            experiment_mask_path=hparams.mask_path,
+            tissue_dir=hparams.tissue_dir,
+            sequence_ids=list(range(hparams.num_sequences - hparams.val_sequences, hparams.num_sequences)),
+            tissue_ids=hparams.tissue_ids,
+            output_channels=NUM_SIGNALS,
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=hparams.batch_size,
+        shuffle=True,
+        num_workers=hparams.num_workers,
+        drop_last=False,
+    )
+
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=hparams.batch_size,
+            shuffle=False,
+            num_workers=hparams.num_workers,
+            drop_last=False,
+        )
+
+    model = EpiGePT.EpiGePT(WORD_NUM, SEQUENCE_DIM, TF_DIM, hparams.batch_size)
+
+    callbacks = []
+    if val_loader is not None:
+        callbacks.append(EarlyStopping(monitor='val_loss', mode='min', patience=5))
+
+    trainer = pl.Trainer(
+        max_epochs=hparams.epochs,
+        logger=pl_loggers.TensorBoardLogger(save_dir='logs', name='TensorBoard', version=hparams.run_name),
+        callbacks=callbacks,
+        default_root_dir=os.getcwd(),
+        devices=hparams.gpus if torch.cuda.is_available() else 1,
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+    )
+
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=42, help="Reproduction")
-    parser.add_argument('--gpus', type=int, default=1, help="How many gpus")
-    parser.add_argument('--train', type=bool, default=True,help="Train or load from pretrained model")
-    parser.add_argument("--pred_method", type=int, default=0, help="Reproduction")
-    parser.add_argument("--fold_idx", type=int, default=0, help="Fold for cross validation during training")
-    parser.add_argument('--pretrain_model_path', type=str, default='./checkpoint/best_model.pt',help="Path of the pretrained-model")
-    parser.add_argument('--save_model_path', type=str, default='./checkpoint',help="Path to save the model")
-    parser.add_argument('--cell_idxs_path', type=str, default='test_cell_type_idxs.npy',help="Path to the indexs of the subset of the cell types")
-    parser.add_argument('--pred_path', type=str, default='checkpoint',help="Path to the indexs of the subset of the cell types")
-    parser.add_argument("--num_train_region", type=int, default=10000, help="Number of training genomic regions")
-    hparams = parser.parse_args()
-    main(hparams)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs")
+    parser.add_argument("--epochs", type=int, default=5, help="Training epochs")
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE, help="Batch size")
+    parser.add_argument("--num_workers", type=int, default=4, help="Dataloader workers")
+
+    parser.add_argument("--dna_path", type=str, required=True, help="Path to corgi DNA one-hot npy")
+    parser.add_argument("--motif_path", type=str, required=True, help="Path to TF binding affinity npy")
+    parser.add_argument("--tf_expression_path", type=str, required=True, help="Path to TF expression npy")
+    parser.add_argument("--mask_path", type=str, required=True, help="Path to experiment mask npy")
+    parser.add_argument("--tissue_dir", type=str, required=True, help="Directory containing tissue_*.npy")
+    parser.add_argument("--num_sequences", type=int, required=True, help="Number of genomic regions to use")
+    parser.add_argument("--tissue_ids", type=int, nargs="+", required=True, help="Tissue IDs to include")
+    parser.add_argument("--val_sequences", type=int, default=0, help="Number of sequences reserved for validation from the end")
+
+    parser.add_argument("--run_name", type=str, default="epigept_corgi", help="Run name for logging")
+
+    args = parser.parse_args()
+    main(args)
